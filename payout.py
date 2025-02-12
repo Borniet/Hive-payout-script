@@ -16,6 +16,8 @@ from datetime import datetime
 
 testing = "NO"
 
+BATCH_SIZE = 10
+
 hive = Hive(node="https://anyx.io", nobroadcast=False, num_retries=3, expiration = 60)
 he_node = "https://engine.rishipanthee.com/"
 he_api = Api(url=he_node)
@@ -254,12 +256,12 @@ def payout(file):
     df["account"] = df["account"].fillna("null")
     df["amount"] = df["amount"].astype(float)
 
-    while (len(df) > 0):
+    while len(df) > 0:
+        print(f"Payments left to process: {len(df)}")
 
-        print("Payments left to process: " + str(len(df)))
-
-        users = df[:25]
-        pay = json.loads(users.to_json(orient="records"));
+        # Process transactions in batches of BATCH_SIZE (10)
+        users = df[:BATCH_SIZE]
+        pay = json.loads(users.to_json(orient="records"))
 
         payload = []
 
@@ -276,7 +278,7 @@ def payout(file):
                 }
             })
 
-        # Remove Backslash of payload
+        # Convert payload to JSON to ensure it's formatted correctly
         jsonBuffer = json.dumps(payload)
         payload = json.loads(jsonBuffer)
 
@@ -285,59 +287,39 @@ def payout(file):
             try:
                 if testing == "NO":
                     result = hive.custom_json("ssc-mainnet-hive", payload, required_auths=[name])
+                    transaction_number = result["trx_id"]
                 else:
-                    result = "testing"
-                    print(payload)
+                    result = {"trx_id": "testing_tx_id"}
+                    transaction_number = result["trx_id"]
+                    print("TEST MODE: ", payload)
 
-
-                pass_test = 1
-                #print(json.dumps(result))
-
+                pass_test = 1  # Mark as successful if no error occurs
 
             except Exception as e:
-                # Get current system exception
-                ex_type, ex_value, ex_traceback = sys.exc_info()
-
-                # Extract unformatter stack traces as tuples
-                trace_back = traceback.extract_tb(ex_traceback)
-
-                # Format stacktrace
-                stack_trace = list()
-
-                for trace in trace_back:
-                    stack_trace.append("File : %s , Line : %d, Func.Name : %s, Message : %s" % (
-                    trace[0], trace[1], trace[2], trace[3]))
-
-                print("Exception type : %s " % ex_type.__name__)
-                #print("Exception message : %s" % ex_value)
-                #print("Stack trace : %s" % stack_trace)
-                print("Payment did not process.  Trying again in 5 seconds...")
+                print("Payment failed, retrying in 5 seconds...")
                 time.sleep(5)
 
-        # update database to mark payments as paid and include tx id.
-
+        # Update database to mark payments as paid and include the transaction ID
         connection = sqlite3.connect('payments.db')
         cursor = connection.cursor()
         now = datetime.now()
-        transaction_number = result["trx_id"]
-        #print(transaction_number)
 
         for payment in pay:
-            id = payment["id"]
+            payment_id = payment["id"]
+            cursor.execute(
+                "UPDATE transactions SET time_paid = ?, txid = ? WHERE id = ?",
+                (now, transaction_number, payment_id)
+            )
 
-            # Update the database with the transaction number and current date for a specific payment (example: payment with ID 1)
-            payment_id = 1
-            cursor.execute("UPDATE transactions SET time_paid = ?, txid = ? WHERE id = ?",
-                           (now, transaction_number, id))
-
-            # Commit the changes and close the connection
-            connection.commit()
-
+        connection.commit()
         connection.close()
 
-        df = df.iloc[25:]
+        df = df.iloc[BATCH_SIZE:]  # Remove processed batch
 
-        time.sleep(5)
+        print(f"Batch of {BATCH_SIZE} payments processed. Waiting 5 seconds to avoid rate limits...")
+        time.sleep(5)  # Wait to avoid rate limit
+
+    print("✅ All payments processed!")
 
 
 if __name__ == "__main__":
